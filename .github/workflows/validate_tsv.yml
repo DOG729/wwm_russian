@@ -26,3 +26,7 @@ jobs:
         run: |
           python .github/scripts/validate_tsv.py translation_ru.tsv
 
+      - name: Validate tags
+        run: |
+          python .github/scripts/validate_tags.py translation_ru.tsv
+
