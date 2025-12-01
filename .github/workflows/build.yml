@@ -47,7 +47,7 @@ jobs:
       - name: Create release archive
         run: |
           cd release/
-          zip -r ../translation_release.zip *.bin
+          zip -r ../translation_release.zip *
           cd ..
       
       # Шаг 7: Загружаем файлы в новый релиз
