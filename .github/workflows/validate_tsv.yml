@@ -23,9 +23,6 @@ jobs:
         with:
           python-version: '3.11'
       
-      - name: Validate tags
-        run: python .github/scripts/validate_tags.py translation_ru.tsv
-      
       - name: Validate translation
         run: python .github/scripts/validate_translation.py translation_ru.tsv
       

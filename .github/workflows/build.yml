@@ -1,0 +1,79 @@
+name: Build Translation Release
+
+on:
+  push:
+    paths:
+      - 'translation_ru.tsv'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyzstd
+      
+      # Шаг 4: Скачиваем файлы игры из последнего релиза game-*
+      - name: Download latest game release
+        run: |
+          mkdir -p ./game_files
+          LATEST_TAG=$(gh release list --exclude-drafts --exclude-pre-releases | grep "^game-" | head -1 | awk '{print $1}')
+          echo "Latest game release: $LATEST_TAG"
+          gh release download "$LATEST_TAG" \
+            --pattern "*.bin" \
+            --dir ./game_files
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
+      # Шаг 5: Запускаем скрипт для сборки перевода
+      - name: Build translation
+        run: |
+          python .github/scripts/wwm_build.py \
+            --input ./game_files/*.bin \
+            --translation translation_ru.tsv \
+            --output ./release/ \
+            --workdir ./work/
+      
+      # Шаг 6: Создаём архив со всеми результатами
+      - name: Create release archive
+        run: |
+          cd release/
+          zip -r ../translation_release.zip *.bin
+          cd ..
+      
+      # Шаг 7: Загружаем файлы в новый релиз
+      - name: Create Translation Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: translation-${{ github.sha }}
+          files: |
+            release/*
+            translation_release.zip
+          body: |
+            🎮 Автоматический релиз перевода
+            
+            📝 Обновлены: `translation_ru.tsv`
+            
+             📁 Файлы:
+            - `translation_release.zip` - архив со всеми файлами
+
+            Поместить с заменой
+
+            - translate_words_map_en
+            - translate_words_map_en_diff
+
+            Steam\steamapps\common\Where Winds Meet\Package\HD\oversea\locale
+            через лаунчер \wwm\wwm_standard\LocalData\Patch\HD\oversea\locale
+            
+            ✅ Сборка выполнена автоматически при обновлении перевода
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
