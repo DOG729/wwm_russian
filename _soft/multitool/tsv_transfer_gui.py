@@ -66,6 +66,104 @@ class ValidatorThread(QtCore.QThread):
         self.finished_signal.emit(returncode, self.description, output)
 
 
+class LengthCheckThread(QtCore.QThread):
+    """Фоновый поток для проверки различий в длине текста."""
+
+    log_signal = QtCore.pyqtSignal(str)
+    progress_signal = QtCore.pyqtSignal(int, int)  # current, total
+    finished_signal = QtCore.pyqtSignal(list)  # problems
+
+    def __init__(self, path_a: str, path_b: str, threshold: int):
+        super().__init__()
+        self.path_a = path_a
+        self.path_b = path_b
+        self.threshold = threshold
+
+    def run(self):
+        try:
+            self.log_signal.emit(f"Загрузка файла A: {self.path_a}")
+            header_a, rows_a = load_tsv(self.path_a)
+            
+            self.log_signal.emit(f"Загрузка файла B: {self.path_b}")
+            header_b, rows_b = load_tsv(self.path_b)
+
+            id_idx_a = find_column_index(header_a, 'ID', 0)
+            id_idx_b = find_column_index(header_b, 'ID', 0)
+            text_idx_a = find_column_index(header_a, 'OriginalText', 1 if len(header_a) > 1 else 0)
+            text_idx_b = find_column_index(header_b, 'OriginalText', 1 if len(header_b) > 1 else 0)
+
+            # Создаем словарь ID -> текст для файла A
+            self.log_signal.emit(f"Индексация файла A ({len(rows_a)} строк)...")
+            map_a = {}
+            for row in rows_a:
+                if len(row) > max(id_idx_a, text_idx_a):
+                    row_id = row[id_idx_a]
+                    text_a = row[text_idx_a] if len(row) > text_idx_a else ''
+                    if row_id:
+                        map_a[row_id] = text_a
+
+            problems = []
+            total = len(rows_b)
+            skipped_chinese = 0
+            
+            self.log_signal.emit(f"Проверка различий в длине ({total} строк)...")
+
+            for idx, row in enumerate(rows_b):
+                # Обновляем прогресс каждые 1000 строк
+                if idx % 1000 == 0:
+                    self.progress_signal.emit(idx, total)
+                
+                if len(row) <= max(id_idx_b, text_idx_b):
+                    continue
+                
+                row_id = row[id_idx_b]
+                text_b = row[text_idx_b] if len(row) > text_idx_b else ''
+                
+                if not row_id or row_id not in map_a:
+                    continue
+                
+                text_a = map_a[row_id]
+                
+                # Пропускаем пустые тексты
+                if not text_a.strip() or not text_b.strip():
+                    continue
+                
+                # Пропускаем строки с китайскими символами
+                if has_chinese(text_a) or has_chinese(text_b):
+                    skipped_chinese += 1
+                    continue
+                
+                len_a = len(text_a)
+                len_b = len(text_b)
+                
+                # Вычисляем процент различия относительно большей длины
+                max_len = max(len_a, len_b)
+                if max_len == 0:
+                    continue
+                    
+                diff_percent = abs(len_a - len_b) / max_len * 100
+                
+                # Если различие больше порога
+                if diff_percent > self.threshold:
+                    problems.append({
+                        'id': row_id,
+                        'text_a': text_a,
+                        'text_b': text_b,
+                        'len_a': len_a,
+                        'len_b': len_b,
+                        'diff_percent': diff_percent
+                    })
+
+            self.progress_signal.emit(total, total)
+            self.log_signal.emit(f"Проверка завершена. Найдено проблем: {len(problems)}")
+            if skipped_chinese > 0:
+                self.log_signal.emit(f"Пропущено строк с китайскими символами: {skipped_chinese}")
+            self.finished_signal.emit(problems)
+        except Exception as e:
+            self.log_signal.emit(f"Ошибка: {e}")
+            self.finished_signal.emit([])
+
+
 def load_tsv(path):
     """Загрузка TSV-файла: возвращает (header, rows[list[list[str]]])."""
     with open(path, 'r', encoding='utf-8-sig', newline='') as f:
@@ -168,6 +266,82 @@ def count_braces(text):
     count_open = text.count('{')
     count_close = text.count('}')
     return (count_open, count_close)
+
+
+def find_length_differences(path_a, path_b, threshold_percent=20):
+    """
+    Находит строки, где длина текста в B отличается от A более чем на threshold_percent процентов.
+    
+    Args:
+        path_a: путь к файлу A (обычно английский)
+        path_b: путь к файлу B (обычно русский)
+        threshold_percent: порог различия в процентах (по умолчанию 20%)
+    
+    Returns:
+        список словарей с проблемными записями
+    """
+    if not os.path.isfile(path_a):
+        raise FileNotFoundError(f"Файл A не найден: {path_a}")
+    if not os.path.isfile(path_b):
+        raise FileNotFoundError(f"Файл B не найден: {path_b}")
+
+    header_a, rows_a = load_tsv(path_a)
+    header_b, rows_b = load_tsv(path_b)
+
+    id_idx_a = find_column_index(header_a, 'ID', 0)
+    id_idx_b = find_column_index(header_b, 'ID', 0)
+    text_idx_a = find_column_index(header_a, 'OriginalText', 1 if len(header_a) > 1 else 0)
+    text_idx_b = find_column_index(header_b, 'OriginalText', 1 if len(header_b) > 1 else 0)
+
+    # Создаем словарь ID -> текст для файла A
+    map_a = {}
+    for row in rows_a:
+        if len(row) > max(id_idx_a, text_idx_a):
+            row_id = row[id_idx_a]
+            text_a = row[text_idx_a] if len(row) > text_idx_a else ''
+            if row_id:
+                map_a[row_id] = text_a
+
+    problems = []
+
+    for row in rows_b:
+        if len(row) <= max(id_idx_b, text_idx_b):
+            continue
+        
+        row_id = row[id_idx_b]
+        text_b = row[text_idx_b] if len(row) > text_idx_b else ''
+        
+        if not row_id or row_id not in map_a:
+            continue
+        
+        text_a = map_a[row_id]
+        
+        # Пропускаем пустые тексты
+        if not text_a.strip() or not text_b.strip():
+            continue
+        
+        len_a = len(text_a)
+        len_b = len(text_b)
+        
+        # Вычисляем процент различия относительно большей длины
+        max_len = max(len_a, len_b)
+        if max_len == 0:
+            continue
+            
+        diff_percent = abs(len_a - len_b) / max_len * 100
+        
+        # Если различие больше порога
+        if diff_percent > threshold_percent:
+            problems.append({
+                'id': row_id,
+                'text_a': text_a,
+                'text_b': text_b,
+                'len_a': len_a,
+                'len_b': len_b,
+                'diff_percent': diff_percent
+            })
+    
+    return problems
 
 
 def find_tag_differences(path_a, path_b):
@@ -448,11 +622,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_find_tag_differences = QtWidgets.QPushButton("7. Поиск различий тегов (A vs B)")
         self.btn_find_tag_differences.clicked.connect(self.handle_find_tag_differences)
 
+        self.btn_find_length_differences = QtWidgets.QPushButton("8. Поиск различий в длине текста (A vs B)")
+        self.btn_find_length_differences.clicked.connect(self.handle_find_length_differences)
+
         validate_layout.addWidget(self.btn_validate_tsv)
         validate_layout.addWidget(self.btn_find_cn)
         validate_layout.addWidget(self.btn_validate_tags)
         validate_layout.addWidget(self.btn_find_broken_params)
         validate_layout.addWidget(self.btn_find_tag_differences)
+        validate_layout.addWidget(self.btn_find_length_differences)
 
         layout.addLayout(validate_layout)
 
@@ -517,6 +695,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Текущий поток-валидатор (чтобы не собрать GC)
         self.validator_thread: ValidatorThread | None = None
+        self.length_check_thread: LengthCheckThread | None = None
+        
+        # Прогресс-бар для длительных операций
+        self.progress_bar = QtWidgets.QProgressBar()
+        self.progress_bar.setVisible(False)
+        layout.addWidget(self.progress_bar)
 
     def browse_a(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -1214,6 +1398,169 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Ошибка", str(e))
             self.append_log(f"Ошибка поиска различий тегов: {e}")
+
+    def handle_find_length_differences(self):
+        """
+        Поиск строк с большим различием в длине текста между файлами A и B.
+        Помогает найти случаи, когда перевод явно некорректный (например, длинный текст заменён на короткое слово).
+        """
+        path_a = self.edit_a.text().strip()
+        path_b = self.edit_b.text().strip()
+
+        if not path_a or not path_b:
+            QtWidgets.QMessageBox.warning(self, "Ошибка", "Укажите пути к файлам A и B.")
+            return
+        if not os.path.isfile(path_a):
+            QtWidgets.QMessageBox.warning(self, "Ошибка", f"Файл A не найден: {path_a}")
+            return
+        if not os.path.isfile(path_b):
+            QtWidgets.QMessageBox.warning(self, "Ошибка", f"Файл B не найден: {path_b}")
+            return
+
+        # Проверяем, не запущен ли уже другой поток
+        if self.length_check_thread is not None and self.length_check_thread.isRunning():
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Проверка",
+                "Проверка уже выполняется. Дождитесь завершения.",
+            )
+            return
+
+        # Спрашиваем порог различия
+        threshold, ok = QtWidgets.QInputDialog.getInt(
+            self,
+            "Порог различия",
+            "Введите порог различия в процентах (рекомендуется 20-30%):",
+            value=20,
+            min=1,
+            max=100,
+            step=5
+        )
+        
+        if not ok:
+            return
+
+        # Запускаем проверку в фоновом потоке
+        self.append_log(f"=== Поиск различий в длине текста (порог: {threshold}%) ===")
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setValue(0)
+        
+        # Отключаем кнопки на время проверки
+        self.btn_find_length_differences.setEnabled(False)
+        
+        self.length_check_thread = LengthCheckThread(path_a, path_b, threshold)
+        self.length_check_thread.log_signal.connect(self.append_log)
+        self.length_check_thread.progress_signal.connect(self.on_length_check_progress)
+        self.length_check_thread.finished_signal.connect(self.on_length_check_finished)
+        self.length_check_thread.start()
+
+    def on_length_check_progress(self, current: int, total: int):
+        """Обновление прогресс-бара."""
+        if total > 0:
+            percent = int(current * 100 / total)
+            self.progress_bar.setValue(percent)
+            self.progress_bar.setFormat(f"Обработано: {current}/{total} ({percent}%)")
+
+    def on_length_check_finished(self, problems: list):
+        """Обработка результатов проверки длины."""
+        self.progress_bar.setVisible(False)
+        self.btn_find_length_differences.setEnabled(True)
+        
+        path_b = self.edit_b.text().strip()
+        threshold = self.length_check_thread.threshold if self.length_check_thread else 20
+
+        if not problems:
+            msg = f"Строк с различием в длине более {threshold}% не найдено."
+            QtWidgets.QMessageBox.information(self, "Различия в длине", msg)
+            self.append_log(msg)
+            return
+
+        try:
+            # Сортируем по проценту различия (от большего к меньшему)
+            problems.sort(key=lambda x: x['diff_percent'], reverse=True)
+
+            msg = (
+                f"Найдено строк с различием в длине более {threshold}%: {len(problems)}. "
+                f"Детали выведены ниже."
+            )
+            self.append_log(msg)
+
+            # Выводим детали проблем (ограничиваем вывод первыми 100 для производительности)
+            for i, p in enumerate(problems[:100]):
+                self.append_log(f"\nID: {p['id']}")
+                self.append_log(f"  Длина A: {p['len_a']}, Длина B: {p['len_b']}, Различие: {p['diff_percent']:.1f}%")
+                self.append_log(f"  A: {p['text_a'][:100]}{'...' if len(p['text_a']) > 100 else ''}")
+                self.append_log(f"  B: {p['text_b'][:100]}{'...' if len(p['text_b']) > 100 else ''}")
+            
+            if len(problems) > 100:
+                self.append_log(f"\n... и ещё {len(problems) - 100} строк (не выведены для экономии места)")
+
+            # Создаем файл _length_diff.tsv
+            b_dir = os.path.dirname(path_b)
+            b_name = os.path.basename(path_b)
+            b_name_no_ext = os.path.splitext(b_name)[0]
+            output_path = os.path.join(b_dir, f"{b_name_no_ext}_length_diff.tsv")
+
+            # Создаём TSV с проблемными строками
+            header_b, rows_b = load_tsv(path_b)
+            id_idx_b = find_column_index(header_b, 'ID', 0)
+            
+            problem_ids = {p['id'] for p in problems}
+            fixed_rows = []
+            for row in rows_b:
+                if len(row) > id_idx_b:
+                    row_id = row[id_idx_b]
+                    if row_id in problem_ids:
+                        fixed_rows.append(row)
+            
+            save_tsv(output_path, header_b, fixed_rows)
+
+            result_msg = (
+                f"Найдено проблемных строк: {len(problems)}.\n"
+                f"Создан файл: {output_path}\n"
+                f"Строк в файле: {len(fixed_rows)}."
+            )
+
+            # Спрашиваем, нужно ли переместить проблемные строки в конец файла B
+            reply = QtWidgets.QMessageBox.question(
+                self,
+                "Различия в длине",
+                (
+                    f"{result_msg}\n\n"
+                    f"Переместить все эти строки (кол-во: {len(problems)}) в конец файла B?\n"
+                    f"Порядок внутри группы будет сохранён."
+                ),
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.No,
+            )
+
+            if reply == QtWidgets.QMessageBox.Yes:
+                # Перемещаем проблемные строки в конец
+                problem_indices = []
+                for idx, row in enumerate(rows_b):
+                    if len(row) > id_idx_b:
+                        row_id = row[id_idx_b]
+                        if row_id in problem_ids:
+                            problem_indices.append(idx)
+                
+                problem_set = set(problem_indices)
+                kept_rows = [row for i, row in enumerate(rows_b) if i not in problem_set]
+                problem_rows = [rows_b[i] for i in problem_indices]
+                new_rows = kept_rows + problem_rows
+
+                save_tsv(path_b, header_b, new_rows)
+                move_msg = (
+                    f"Строки с различием в длине перемещены в конец файла B. "
+                    f"Всего перемещено: {len(problems)}."
+                )
+                self.append_log(move_msg)
+                QtWidgets.QMessageBox.information(self, "Различия в длине", result_msg + "\n\n" + move_msg)
+            else:
+                QtWidgets.QMessageBox.information(self, "Различия в длине", result_msg)
+                self.append_log(f"\n{result_msg}")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Ошибка", str(e))
+            self.append_log(f"Ошибка обработки результатов: {e}")
 
     # --- Операции по фрагменту текста в файле B ---
 
