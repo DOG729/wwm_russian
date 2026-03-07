@@ -86,7 +86,7 @@
 
         <!-- Статистика выбранного языкового файла -->
         <section class="border border-gray-200 rounded-lg p-4 bg-white">
-            <h2 class="text-sm font-semibold text-gray-800 mb-3" id="langStatsTitle">Предворительный перевод</h2>
+            <h2 class="text-sm font-semibold text-gray-800 mb-3" id="langStatsTitle">Предварительный перевод</h2>
             <div id="cnStats" class="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div class="text-center p-3 bg-gray-50 rounded">
                     <div class="text-2xl font-bold text-gray-900" id="cnTotal">-</div>
@@ -346,7 +346,7 @@
             // Обновляем заголовок и подписи под выбранный языковой файл
             const langTitle = document.getElementById('langStatsTitle');
             const langLabel = document.getElementById('cnLangLabel');
-            if (langTitle) langTitle.textContent = `Предворительный перевод (${langCfg.name})`;
+            if (langTitle) langTitle.textContent = `Предварительный перевод (${langCfg.name})`;
             if (langLabel) langLabel.textContent = langCfg.name;
 
             // Подсчитываем статистику для AI-файла
