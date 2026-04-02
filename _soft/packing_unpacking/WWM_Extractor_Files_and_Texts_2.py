@@ -1,4 +1,4 @@
-﻿import re
+import re
 import os
 import struct
 import pyzstd
@@ -20,6 +20,7 @@ LANG_UI = {
         "group_pack_texts": "📦 Pack text",
         "group_translate": "📑 Translation by ID",
         "group_full_extract": "📦 Full extract (file → data + text)",
+        "group_full_pack": "📦 Full pack (data + text → file)",
         "btn_select_file": "📄 Select file",
         "btn_select_folder": "📂 Select folder",
         "btn_output_folder": "📂 Output folder",
@@ -31,9 +32,15 @@ LANG_UI = {
         "btn_pack_text_run": "Pack",
         "btn_tr_select_file": "📄 Select TextExtractor.csv",
         "label_tr_format": "Translation file format",
+        "label_text_path": "Unpack/pack method (1.0 / 2.0)",
         "btn_tr_export": "Create CSV/TSV: ID,OriginalText",
         "btn_tr_apply": "Apply translations from CSV/TSV",
         "btn_tr_debug": "Create debug TextExtractor.csv (tags)",
+        "btn_tr_validate": "Validate TextExtractor.csv",
+        "btn_full_pack_base_folder": "📂 Folder with data and text",
+        "btn_full_pack_trans_file": "📄 Translation CSV/TSV (ID,OriginalText)",
+        "btn_full_pack_output_file": "📂 Output game file",
+        "btn_full_pack_run": "Pack data + text",
     },
     "ru": {
         "ui_lang_label": "Язык интерфейса:",
@@ -43,6 +50,7 @@ LANG_UI = {
         "group_pack_texts": "📦 Запаковка текста",
         "group_translate": "📑 Перевод по ID",
         "group_full_extract": "📦 Полная распаковка (файл → data + text)",
+        "group_full_pack": "📦 Полная запаковка (data + text → файл)",
         "btn_select_file": "📄 Выберите файл",
         "btn_select_folder": "📂 Выберите папку",
         "btn_output_folder": "📂 Папка сохранения",
@@ -54,11 +62,24 @@ LANG_UI = {
         "btn_pack_text_run": "Запаковать",
         "btn_tr_select_file": "📄 Выберите TextExtractor.csv",
         "label_tr_format": "Формат файла перевода",
+        "label_text_path": "Метод распаковки/запаковки текста",
         "btn_tr_export": "Создать CSV/TSV: ID,OriginalText",
         "btn_tr_apply": "Применить переводы из CSV/TSV",
         "btn_tr_debug": "Создать debug TextExtractor.csv (теги)",
+        "btn_tr_validate": "Проверить TextExtractor.csv",
+        "btn_full_pack_base_folder": "📂 Папка с data и text",
+        "btn_full_pack_trans_file": "📄 Файл перевода CSV/TSV (ID,OriginalText)",
+        "btn_full_pack_output_file": "📂 Итоговый файл игры",
+        "btn_full_pack_run": "Запаковать data + text",
     },
 }
+
+# Коды путей формата текста
+TEXT_FORMAT_PATH_1 = "path_1"  # версия 1.0 
+TEXT_FORMAT_PATH_2 = "path_2"  # версия 2.0 
+
+# Текущий выбранный путь (по умолчанию 2.0)
+CURRENT_TEXT_PATH = TEXT_FORMAT_PATH_1
 
 def extract_file(input_file, output_dir, log_callback):
     try:
@@ -168,7 +189,12 @@ def pak_file(input_file, output_dir, log_callback):
     except Exception as e:
         log_callback(f"❌ Ошибка сборки файла: {str(e)}")
 
-def extract_text(input_path, output_dir, log_callback):
+
+def extract_text_v1_0(input_path, output_dir, log_callback):
+    """
+    Версия 1.0 (path_1) распаковки текста.
+    CSV формат: Number;File;All Blocks;Work Blocks;Current Block;Unknown;ID;OriginalText
+    """
     try:
         if os.path.isdir(input_path):
             y = 0
@@ -178,16 +204,17 @@ def extract_text(input_path, output_dir, log_callback):
                     full_path = os.path.join(input_path, filename)
                     if os.path.isfile(full_path):
                         base_name = os.path.splitext(os.path.basename(full_path))[0]
+                        # Для версии 1.0 тоже ограничиваем размер читаемого текста,
+                        # чтобы не уходить в бесконечную перепаковку на битых offset/length.
+                        file_size = os.path.getsize(full_path)
+                        file_size_limit = file_size * 10
                         with open(full_path, 'rb') as f:
                             f.seek(16)
                             code = b''
                             if f.read(4) == b'\xDC\x96\x58\x59':
                                 y += 1
-                                if y == 1:
-                                    form = 'w'
-                                else:
-                                    form = 'a'
-                                output_path = os.path.join(output_dir, f"TextExtractor.csv")
+                                form = 'w' if y == 1 else 'a'
+                                output_path = os.path.join(output_dir, "TextExtractor.csv")
                                 file_name = os.path.basename(full_path)
                                 f.seek(0)
                                 count_full = struct.unpack('<I', f.read(4))[0]
@@ -203,29 +230,221 @@ def extract_text(input_path, output_dir, log_callback):
                                         writer.writerow(['Number','File','All Blocks','Work Blocks','Current Block','Unknown','ID','OriginalText'])
                                     for i in range(count_full):
                                         f.seek(data_start + (i * 16))
-                                        id = f.read(8).hex()
+                                        id_hex = f.read(8).hex()
                                         start_text_offset = f.tell()
                                         offset_text = struct.unpack('<I', f.read(4))[0]
-                                        lenght = struct.unpack('<I', f.read(4))[0]
-                                        f.seek(start_text_offset + offset_text)
-                                        text = f.read(lenght).decode('utf-8', errors='ignore')
-                                        text = text.replace('\n', '\\n')
-                                        text = text.replace('\r', '\\r')
+                                        length = struct.unpack('<I', f.read(4))[0]
+
+                                        text = ""
+                                        if length > 0:
+                                            text_offset = start_text_offset + offset_text
+                                            # Проверяем валидность смещения (с запасом), как в версии 2.0
+                                            if text_offset >= 0 and text_offset + length <= file_size_limit:
+                                                f.seek(text_offset)
+                                                text = f.read(length).decode('utf-8', errors='ignore')
+                                                text = text.replace('\n', '\\n').replace('\r', '\\r')
+                                            else:
+                                                # Если смещение совсем странное — пишем длину вместо текста,
+                                                # чтобы не уезжать за пределы файла.
+                                                text = str(length)
+
                                         k += 1
-                                        writer.writerow([str(k), file_name, count_full, count_text, str(i), code[i*2:(i+1)*2], id, text])
+                                        writer.writerow([str(k), file_name, count_full, count_text, str(i), code[i*2:(i+1)*2], id_hex, text])
                                 log_callback(f"Обработан - {base_name}.txt - {count_text}")
+        log_callback(f"✅ Распаковка текста завершена в {output_dir}")
+        return True
+    except Exception as e:
+        log_callback(f"❌ Ошибка распаковки (1.0): {str(e)}")
+        return False
+
+
+def extract_text_v2_0(input_path, output_dir, log_callback):
+    try:
+        if os.path.isdir(input_path):
+            y = 0
+            k = 0
+            # Сортируем файлы по номеру для правильного порядка
+            dat_files = [f for f in os.listdir(input_path) if f.endswith('.dat')]
+            dat_files.sort(key=lambda x: int(re.search(r'(\d+)\.dat$', x).group(1)) if re.search(r'(\d+)\.dat$', x) else 0)
+            
+            for filename in dat_files:
+                # Пропускаем файл _0.dat (это заголовочный файл контейнера, не текстовый)
+                if filename.endswith('_0.dat'):
+                    continue
+                    
+                full_path = os.path.join(input_path, filename)
+                if os.path.isfile(full_path):
+                    base_name = os.path.splitext(os.path.basename(full_path))[0]
+                    # Получаем размер файла для проверки валидности смещений (с запас)
+                    file_size = os.path.getsize(full_path)
+                    file_size_limit = file_size * 10
+                    with open(full_path, 'rb') as f:
+                        # Проверяем сигнатуру на позиции 16
+                        f.seek(16)
+                        signature = f.read(4)
+                        if signature == b'\xDC\x96\x58\x59':
+                            y += 1
+                            if y == 1:
+                                form = 'w'
+                            else:
+                                form = 'a'
+                            output_path = os.path.join(output_dir, f"TextExtractor.csv")
+                            file_name = os.path.basename(full_path)
+                            
+                            # Читаем заголовок 
+                            f.seek(0)
+                            count_full = struct.unpack('<I', f.read(4))[0]  # INT32 (4 байта)
+                            
+                            # Вычисляем позицию таблицы (GetTableOffset)
+                            # Для translate_words_map_*_diff используется формула A (48/56/296/552)
+                            if count_full <= 8:
+                                table_offset = 24 + 24
+                            elif count_full <= 128:
+                                table_offset = 32 + 24
+                            elif count_full <= 256:
+                                table_offset = 272 + 24
+                            else:
+                                table_offset = 552
+                            
+                            # Читаем HeaderData (всё между count и table_offset)
+                            header_data = f.read(table_offset - 4)
+                            header_hex = header_data.hex()  # Сохраняем как hex
+                            
+                            # Определяем count_text (из HeaderData на позиции 4-8)
+                            count_text = struct.unpack('<I', header_data[4:8])[0] if len(header_data) >= 8 else count_full
+                            
+                            with open(output_path, form, newline='', encoding="utf-8") as out_f:
+                                writer = csv.writer(out_f, delimiter=';')
+                                if form == 'w':
+                                    writer.writerow(['Number','File','All Blocks','Work Blocks','HeaderData','ID','OriginalText'])
+                                
+                                for i in range(count_full):
+                                    # Позиция записи в таблице
+                                    entry_offset = table_offset + (i * 16)
+                                    f.seek(entry_offset)
+                                    
+                                    # логика: current = позиция ДО чтения ID
+                                    current = f.tell()
+                                    
+                                    id_bytes = f.read(8)
+                                    id_hex = id_bytes.hex()
+                                    
+                                    offset = struct.unpack('<I', f.read(4))[0]
+                                    length = struct.unpack('<I', f.read(4))[0]
+                                    
+                                    # расчёт: TextOffset = offset + current + 8
+                                    text_offset = offset + current + 8
+                                    
+                                    # Читаем текст
+                                    text = ""
+                                    if length > 0:
+                                        # Проверяем валидность смещения (с запасом)
+                                        if text_offset >= 0 and text_offset + length <= file_size_limit:
+                                            f.seek(text_offset)
+                                            text = f.read(length).decode('utf-8', errors='ignore')
+                                            # Заменяем спецсимволы на escape-последовательности для CSV
+                                            text = text.replace('\n', '\\n')
+                                            text = text.replace('\r', '\\r')
+                                        else:
+                                            text = str(length)
+                                    
+                                    k += 1
+                                    # HeaderData пишем только для первой записи файла
+                                    if i == 0:
+                                        writer.writerow([str(k), file_name, count_full, count_text, header_hex, id_hex, text])
+                                    else:
+                                        writer.writerow([str(k), file_name, count_full, count_text, "", id_hex, text])
+                            
+                            log_callback(f"Обработан - {base_name}.txt - {count_text}")
         log_callback(f"✅ Распаковка текста завершена в {output_path}")   
         return True
     except Exception as e:
         log_callback(f"❌ Ошибка распаковки: {str(e)}")
         return False
 
-def pak_text(input_file, output_dir, log_callback):
+def pak_text_v2_0(input_file, output_dir, log_callback):
+    """
+    Запаковка текста в .dat файлы (с HeaderData)
+    CSV формат: Number;File;All Blocks;Work Blocks;HeaderData;ID;OriginalText
+    """
+    try:
+        base_name = ''
+        count_full = 0
+        with open(input_file, 'r', encoding='utf-8') as f:
+            reader = csv.reader(f, delimiter=';')
+            
+            # Переменные для текущего файла
+            all_blocks = b''
+            header_data = b''
+            filled_bytes_id = b''
+            filled_bytes_text = b''
+            table_offset = 0
+            text_entries = []  # Список записей (ID, текст) для текущего файла
+            
+            for row in reader:
+                if row[0] == "Number" or row[1] == 'File':
+                    continue
+                    
+                if row[1] != base_name:
+                    # Записываем предыдущий файл
+                    if base_name != '' and len(text_entries) > 0:
+                        _write_dat_file_csharp(output_dir, base_name, count_full, header_data, text_entries, log_callback)
+                    
+                    # Начинаем новый файл
+                    base_name = str(row[1])
+                    count_full = int(row[2])
+                    
+                    # Читаем HeaderData из CSV (только из первой записи файла)
+                    if row[4] and row[4].strip():
+                        header_data = bytes.fromhex(row[4])
+                    else:
+                        # Если HeaderData пустой, создаём дефолтный
+                        work_blocks_count = int(row[3])
+                        header_data = _create_default_header(count_full, work_blocks_count)
+                    
+                    # Вычисляем table_offset
+                    if count_full == 0:
+                        table_offset = 8
+                    else:
+                        num = (count_full + 16) // 16 * 16
+                        table_offset = num + 25
+                    
+                    text_entries = []
+                
+                # Обрабатываем текст
+                text = (
+                    row[6]  # Теперь текст в колонке 6 (было 7)
+                    .replace('\\n', '\x0A')
+                    .replace('\\r', '\x0D')
+                    .encode('utf-8')
+                )
+                
+                # ID (8 байт)
+                id_hex = row[5]  # Теперь ID в колонке 5 (было 6)
+                
+                text_entries.append((id_hex, text))
+            
+            # Записываем последний файл
+            if base_name != '' and len(text_entries) > 0:
+                _write_dat_file_csharp(output_dir, base_name, count_full, header_data, text_entries, log_callback)
+        
+        log_callback(f"✅ Запаковка завершена")            
+        return True
+
+    except Exception as e:
+        log_callback(f"❌ Ошибка запаковки: {str(e)}")
+        return False
+
+
+def pak_text_v1_0(input_file, output_dir, log_callback):
+    """
+    Версия 1.0 (path_1) запаковки текста.
+    CSV формат: Number;File;All Blocks;Work Blocks;Current Block;Unknown;ID;OriginalText
+    """
     try:
         base_name = ''
         with open(input_file, 'r', encoding='utf-8') as f:
             reader = csv.reader(f, delimiter=';')
-            k = 0
             start_unk = 0
             start_id = 0
             curr_text = 0
@@ -237,7 +456,7 @@ def pak_text(input_file, output_dir, log_callback):
             for row in reader:
                 if row[0] == "Number" or row[1] == 'File':
                     continue
-                    
+
                 if row[1] != base_name:
                     form = 'wb'
                     if base_name != '':
@@ -252,7 +471,7 @@ def pak_text(input_file, output_dir, log_callback):
                     base_name = str(row[1])
                 else:
                     form = 'ab'
-                    
+
                 if form == 'wb':
                     all_blocks = struct.pack('<II', int(row[2]), 0)
                     work_blocks = struct.pack('<II', int(row[3]), 0)
@@ -263,7 +482,7 @@ def pak_text(input_file, output_dir, log_callback):
                     start_unk = len(all_blocks) + len(work_blocks) + len(file_bytes)
                     start_id = start_unk + int(row[2]) + 17
                     curr_text = start_id + int(row[2]) * 16
-                
+
                 text = row[7].replace('\\n', '\x0A').encode('utf-8')
                 unk_byte = bytes.fromhex(row[5])
                 filled_bytes_unk += unk_byte
@@ -281,20 +500,113 @@ def pak_text(input_file, output_dir, log_callback):
                 start_id += 8
                 filled_bytes_text += text
                 curr_text += len(text)
-            output_path = os.path.join(output_dir, base_name)
-            with open(output_path, form) as out_f:
-                out_f.write(all_blocks)
-                out_f.write(work_blocks)
-                out_f.write(file_bytes)
-                out_f.write(filled_bytes_unk)
-                out_f.write(filled_bytes_id)
-                out_f.write(filled_bytes_text)
-        log_callback(f"✅ Запаковка завершена")            
+            if base_name:
+                output_path = os.path.join(output_dir, base_name)
+                with open(output_path, form) as out_f:
+                    out_f.write(all_blocks)
+                    out_f.write(work_blocks)
+                    out_f.write(file_bytes)
+                    out_f.write(filled_bytes_unk)
+                    out_f.write(filled_bytes_id)
+                    out_f.write(filled_bytes_text)
+        log_callback("✅ Запаковка завершена (1.0)")
         return True
 
     except Exception as e:
-        log_callback(f"❌ Ошибка запаковки: {str(e)}")
+        log_callback(f"❌ Ошибка запаковки (1.0): {str(e)}")
         return False
+
+
+def _create_default_header(count_full, work_blocks_count):
+    """Создаёт дефолтный HeaderData если его нет в CSV"""
+    # work_blocks (4 байта) + padding (4 байта)
+    header = struct.pack('<II', work_blocks_count, 0)
+    # Сигнатура (8 байт)
+    header += b'\xDC\x96\x58\x59\x00\x00\x00\x00'
+    # Unknown bytes (count_full байт по 0x80)
+    header += b'\x80' * count_full
+    # 0xFF маркер
+    header += b'\xFF'
+    # Паддинг до table_offset
+    if count_full == 0:
+        table_offset = 8
+    else:
+        num = (count_full + 16) // 16 * 16
+        table_offset = num + 25
+    padding_needed = table_offset - 4 - len(header)
+    if padding_needed > 0:
+        header += b'\x80' * padding_needed
+    return header
+
+
+def _write_dat_file_csharp(output_dir, filename, count, header_data, text_entries, log_callback):
+    """
+    Записывает .dat файл редактора
+    header_data: весь блок между count и ID таблицей
+    text_entries: список кортежей (id_hex, text_bytes)
+    """
+    try:
+        output_path = os.path.join(output_dir, filename)
+        
+        with open(output_path, 'wb') as out_f:
+            # 1. Пишем count (4 байта)
+            out_f.write(struct.pack('<I', count))
+            
+            # 2. Пишем HeaderData
+            out_f.write(header_data)
+            
+            # 3. Пишем нули для ID таблицы (заполним позже)
+            table_start = out_f.tell()
+            zeros = b'\x00' * 16
+            for i in range(count):
+                out_f.write(zeros)
+            
+            # 4. Пишем тексты и заполняем ID таблицу
+            for i, (id_hex, text_bytes) in enumerate(text_entries):
+                # Позиция текущего текста
+                text_offset = out_f.tell()
+                out_f.write(text_bytes)
+                
+                # Вычисляем offset для ID таблицы
+                table_entry_pos = table_start + (i * 16)
+                offset = text_offset - table_entry_pos - 8
+                length = len(text_bytes)
+                
+                # Записываем в ID таблицу
+                current_pos = out_f.tell()
+                out_f.seek(table_entry_pos)
+                out_f.write(bytes.fromhex(id_hex))
+                out_f.write(struct.pack('<II', offset, length))
+                out_f.seek(current_pos)
+        
+    except Exception as e:
+        log_callback(f"❌ Ошибка записи файла {filename}: {str(e)}")
+
+
+def extract_text(input_path, output_dir, log_callback):
+    """
+    Обёртка над версиями 1.0 и 2.0 распаковки текста.
+    Выбор версии задаётся кодом CURRENT_TEXT_PATH (path_1 или path_2).
+    """
+    if CURRENT_TEXT_PATH == TEXT_FORMAT_PATH_1:
+        log_callback("▶ Используется версия распаковки 1.0")
+        return extract_text_v1_0(input_path, output_dir, log_callback)
+    else:
+        log_callback("▶ Используется версия распаковки 2.0")
+        return extract_text_v2_0(input_path, output_dir, log_callback)
+
+
+def pak_text(input_file, output_dir, log_callback):
+    """
+    Обёртка над версиями 1.0 и 2.0 запаковки текста.
+    Выбор версии задаётся кодом CURRENT_TEXT_PATH (path_1 или path_2).
+    """
+    if CURRENT_TEXT_PATH == TEXT_FORMAT_PATH_1:
+        log_callback("▶ Используется версия запаковки 1.0")
+        return pak_text_v1_0(input_file, output_dir, log_callback)
+    else:
+        log_callback("▶ Используется версия запаковки 2.0")
+        return pak_text_v2_0(input_file, output_dir, log_callback)
 
 
 def extract_all(input_file, output_dir, log_callback):
@@ -334,14 +646,199 @@ def extract_all(input_file, output_dir, log_callback):
         return False
 
 
+def pak_file_custom(input_dir, output_file, log_callback):
+    """
+    Вариант pak_file с явным именем итогового файла.
+    """
+    try:
+        files = [f for f in os.listdir(input_dir) if f.endswith('.dat')]
+
+        def extract_number(filename):
+            match = re.search(r'(\d+)\.dat$', filename)
+            return int(match.group(1)) if match else float('inf')
+
+        files.sort(key=extract_number)
+
+        if not files:
+            log_callback("❌ В папке с данными нет ни одного .dat файла для сборки")
+            return False
+
+        with open(output_file, 'wb') as outfile:
+            outfile.write(b'\xEF\xBE\xAD\xDE\x01\x00\x00\x00')
+            count_files = struct.pack('<I', len(files))
+            outfile.write(count_files)
+            archive = b''
+            for filename in files:
+                file_path = os.path.join(input_dir, filename)
+                file_size = os.path.getsize(file_path)
+                with open(file_path, 'rb') as infile:
+                    comp_data = pyzstd.compress(infile.read())
+                    header = struct.pack('<BII', 4, len(comp_data), file_size)
+                    len_arch = struct.pack('<I', len(archive))
+                    outfile.write(len_arch)
+                    archive += header + comp_data
+                log_callback(f"Обработан: {filename}")
+
+            len_arch = struct.pack('<I', len(archive))
+            outfile.write(len_arch)
+            outfile.write(archive)
+
+        log_callback(f"✅ Сборка завершена. Файл сохранен как: {output_file}")
+        return True
+    except Exception as e:
+        log_callback(f"❌ Ошибка сборки файла: {str(e)}")
+        return False
+
+
+def full_pack(base_dir, trans_path, output_file, log_callback):
+    """
+    Полная запаковка:
+    1) берёт text/TextExtractor.csv и файл перевода (CSV/TSV: ID,OriginalText);
+    2) создаёт text/TextExtractor_new.csv с подставленными переводами;
+    3) из TextExtractor_new.csv пересобирает .dat-файлы прямо в существующей папке data/;
+       (файл вида *_0.dat с «шапкой» остаётся нетронутым);
+    4) из папки data/ собирает итоговый bin-файл с указанным именем.
+    """
+    try:
+        if not base_dir:
+            log_callback("❌ Полная запаковка: базовая папка не задана")
+            return False
+        if not trans_path or not os.path.isfile(trans_path):
+            log_callback("❌ Полная запаковка: файл перевода не найден")
+            return False
+        if not output_file:
+            log_callback("❌ Полная запаковка: путь итогового файла не задан")
+            return False
+
+        text_dir = os.path.join(base_dir, "text")
+        data_dir = os.path.join(base_dir, "data")
+        textextractor_path = os.path.join(text_dir, "TextExtractor.csv")
+
+        if not os.path.isdir(text_dir) or not os.path.isdir(data_dir):
+            log_callback("❌ Полная запаковка: в выбранной папке нет подпапок data и text")
+            return False
+        if not os.path.isfile(textextractor_path):
+            log_callback("❌ Полная запаковка: не найден text/TextExtractor.csv")
+            return False
+
+        dat_files = [f for f in os.listdir(data_dir) if f.endswith(".dat")]
+        if not dat_files:
+            log_callback("❌ Полная запаковка: в папке data нет ни одного .dat файла")
+            return False
+
+        log_callback(f"▶ Полная запаковка для папки: {base_dir}")
+        log_callback(f"   Файл перевода: {trans_path}")
+        log_callback(f"   Исходный TextExtractor.csv: {textextractor_path}")
+
+        # 1. Читаем файл перевода и строим словарь ID -> текст
+        ext = os.path.splitext(trans_path)[1].lower()
+        if ext == '.tsv':
+            delim = '\t'
+        else:
+            delim = ';'
+
+        translations = {}
+        try:
+            with open(trans_path, 'r', encoding='utf-8', newline='') as tf:
+                reader = csv.reader(tf, delimiter=delim)
+                header = next(reader, None)
+                if header:
+                    try:
+                        id_idx = header.index('ID')
+                        text_idx = header.index('OriginalText')
+                    except ValueError:
+                        id_idx = 0
+                        text_idx = 1
+                        if len(header) > 1 and header[0].strip():
+                            translations[header[0].strip()] = header[1]
+                for row in reader:
+                    if len(row) <= max(id_idx, text_idx):
+                        continue
+                    key = row[id_idx].strip()
+                    if not key:
+                        continue
+                    text = row[text_idx]
+                    text = text.replace('\n', '\\n').replace('\r', '\\r')
+                    translations[key] = text
+        except Exception as e:
+            log_callback(f"❌ Полная запаковка: ошибка чтения файла перевода: {str(e)}")
+            return False
+
+        if not translations:
+            log_callback("❌ Полная запаковка: в файле перевода не найдено ни одной строки с ID")
+            return False
+
+        # 2. Создаём TextExtractor_new.csv на основе оригинального TextExtractor.csv
+        new_csv_path = os.path.join(text_dir, "TextExtractor_new.csv")
+        try:
+            replaced = 0
+            total = 0
+            with open(textextractor_path, 'r', encoding='utf-8', newline='') as src_f, \
+                 open(new_csv_path, 'w', encoding='utf-8', newline='') as out_f:
+
+                reader = csv.reader(src_f, delimiter=';')
+                writer = csv.writer(out_f, delimiter=';')
+
+                header = next(reader, None)
+                if not header:
+                    log_callback("❌ Полная запаковка: в TextExtractor.csv нет заголовка")
+                    return False
+
+                writer.writerow(header)
+
+                try:
+                    id_idx_csv = header.index('ID')
+                    text_idx_csv = header.index('OriginalText')
+                except ValueError:
+                    log_callback("❌ Полная запаковка: в TextExtractor.csv не найдены колонки 'ID' и 'OriginalText'")
+                    return False
+
+                for row in reader:
+                    if len(row) <= max(id_idx_csv, text_idx_csv):
+                        writer.writerow(row)
+                        continue
+                    total += 1
+                    key = row[id_idx_csv]
+                    if key in translations:
+                        row[text_idx_csv] = translations[key]
+                        replaced += 1
+                    writer.writerow(row)
+
+            log_callback(f"✅ Создан TextExtractor_new.csv: {new_csv_path} (заменено строк: {replaced} из {total})")
+        except Exception as e:
+            log_callback(f"❌ Полная запаковка: ошибка при создании TextExtractor_new.csv: {str(e)}")
+            return False
+
+        # 3. Запаковка текста в .dat прямо в существующую папку data/
+        #    Здесь обновляются только те файлы, которые есть в TextExtractor_new.csv.
+        #    «Шапочный» файл вида *_0.dat (без текста) остаётся как есть.
+        log_callback(f"▶ Запаковка текста в DAT (папка: {data_dir})")
+        ok_text = pak_text(new_csv_path, data_dir, log_callback)
+        if not ok_text:
+            log_callback("❌ Полная запаковка: ошибка на этапе запаковки текста")
+            return False
+
+        # 4. Сборка итогового bin-файла из основной папки data/
+        log_callback(f"▶ Сборка итогового файла: {output_file}")
+        ok_file = pak_file_custom(data_dir, output_file, log_callback)
+        if not ok_file:
+            log_callback("❌ Полная запаковка: ошибка на этапе сборки итогового файла")
+            return False
+
+        log_callback(f"✅ Полная запаковка завершена. Итоговый файл: {output_file}")
+        return True
+    except Exception as e:
+        log_callback(f"❌ Ошибка полной запаковки: {str(e)}")
+        return False
 class WorkerThread(QThread):
     log_signal = pyqtSignal(str)
 
-    def __init__(self, input_path, output_dir, func):
+    def __init__(self, input_path, output_dir, func, extra=None):
         super().__init__()
         self.input_path = input_path
         self.output_dir = output_dir
         self.func = func
+        self.extra = extra
 
     def run(self):
         if self.func == 1:
@@ -354,6 +851,15 @@ class WorkerThread(QThread):
             pak_text(self.input_path, self.output_dir, self.log_signal.emit)
         elif self.func == 5:
             extract_all(self.input_path, self.output_dir, self.log_signal.emit)
+        elif self.func == 6:
+            # Полная запаковка (data + text → итоговый файл)
+            # input_path: базовая папка с data/ и text/
+            # output_dir: полный путь к итоговому .bin файлу
+            # extra: словарь с ключом trans_path
+            trans_path = None
+            if isinstance(self.extra, dict):
+                trans_path = self.extra.get("trans_path")
+            full_pack(self.input_path, trans_path, self.output_dir, self.log_signal.emit)
 
 class MyApp(QWidget):
     def __init__(self):
@@ -421,6 +927,7 @@ class MyApp(QWidget):
         group_box_pack_texts = QGroupBox(self._t("group_pack_texts"))
         group_box_translate = QGroupBox(self._t("group_translate"))
         group_box_full_extract = QGroupBox(self._t("group_full_extract"))
+        group_box_full_pack = QGroupBox(self._t("group_full_pack"))
 
         # Создаем QPushButton's в "Распаковка файлов"
         group_layout = QGridLayout()
@@ -500,6 +1007,40 @@ class MyApp(QWidget):
         group_layout.addWidget(buttonFE_run, 2, 0, 1, 0)
         group_box_full_extract.setLayout(group_layout)
 
+        # Создаем QPushButton's в "Полная запаковка (data + text → файл)"
+        group_layout = QGridLayout()
+        group_layout.setColumnMinimumWidth(0, 250)
+        group_layout.setColumnStretch(0, 0)
+        group_layout.setColumnStretch(1, 1)
+
+        buttonFP_base_folder = QPushButton(self._t("btn_full_pack_base_folder"))
+        self.labelFP_base_folder = QLabel('Папка не выбрана')
+        self.labelFP_base_folder.setWordWrap(True)
+        buttonFP_base_folder.clicked.connect(self.selectFP_base_folder)
+        group_layout.addWidget(buttonFP_base_folder, 0, 0)
+        group_layout.addWidget(self.labelFP_base_folder, 0, 1)
+
+        buttonFP_trans_file = QPushButton(self._t("btn_full_pack_trans_file"))
+        self.labelFP_trans_file = QLabel('Файл не выбран')
+        self.labelFP_trans_file.setWordWrap(True)
+        buttonFP_trans_file.clicked.connect(self.selectFP_trans_file)
+        group_layout.addWidget(buttonFP_trans_file, 1, 0)
+        group_layout.addWidget(self.labelFP_trans_file, 1, 1)
+
+        buttonFP_output_file = QPushButton(self._t("btn_full_pack_output_file"))
+        self.labelFP_output_file = QLabel('Файл не выбран')
+        self.labelFP_output_file.setWordWrap(True)
+        buttonFP_output_file.clicked.connect(self.selectFP_output_file)
+        group_layout.addWidget(buttonFP_output_file, 2, 0)
+        group_layout.addWidget(self.labelFP_output_file, 2, 1)
+
+        buttonFP_run = QPushButton(self._t("btn_full_pack_run"))
+        buttonFP_run.setStyleSheet("background: #9C27B0; color: white; font-weight: bold;")
+        buttonFP_run.clicked.connect(self.start_processing6)
+        group_layout.addWidget(buttonFP_run, 3, 0, 1, 0)
+
+        group_box_full_pack.setLayout(group_layout)
+
         # Создаем QPushButton's в "Распаковка текста"
         group_layout = QGridLayout()
         group_layout.setColumnMinimumWidth(0, 250)
@@ -572,20 +1113,33 @@ class MyApp(QWidget):
         group_layout.addWidget(labelTR_format, 1, 0)
         group_layout.addWidget(self.comboTR_format, 1, 1)
 
+        # Выбор версии формата текста (1.0 / 2.0)
+        label_text_path = QLabel(self._t("label_text_path"))
+        self.comboTextPath = QComboBox()
+        self.comboTextPath.addItem("1.0 (path_1)", TEXT_FORMAT_PATH_1)
+        self.comboTextPath.addItem("2.0 (path_2)", TEXT_FORMAT_PATH_2)
+        group_layout.addWidget(label_text_path, 2, 0)
+        group_layout.addWidget(self.comboTextPath, 2, 1)
+
         buttonTR_export = QPushButton(self._t("btn_tr_export"))
         buttonTR_export.setStyleSheet("background: #2196F3; color: white; font-weight: bold;")
         buttonTR_export.clicked.connect(self.export_translation_csv)
-        group_layout.addWidget(buttonTR_export, 2, 0, 1, 0)
+        group_layout.addWidget(buttonTR_export, 3, 0, 1, 0)
 
         buttonTR_apply = QPushButton(self._t("btn_tr_apply"))
         buttonTR_apply.setStyleSheet("background: #4CAF50; color: white; font-weight: bold;")
         buttonTR_apply.clicked.connect(self.apply_translation_csv)
-        group_layout.addWidget(buttonTR_apply, 3, 0, 1, 0)
+        group_layout.addWidget(buttonTR_apply, 4, 0, 1, 0)
 
         buttonTR_debug = QPushButton(self._t("btn_tr_debug"))
         buttonTR_debug.setStyleSheet("background: #FF9800; color: white; font-weight: bold;")
         buttonTR_debug.clicked.connect(self.create_debug_csv)
-        group_layout.addWidget(buttonTR_debug, 4, 0, 1, 0)
+        group_layout.addWidget(buttonTR_debug, 5, 0, 1, 0)
+
+        buttonTR_validate = QPushButton(self._t("btn_tr_validate"))
+        buttonTR_validate.setStyleSheet("background: #607D8B; color: white; font-weight: bold;")
+        buttonTR_validate.clicked.connect(self.validate_textextractor_csv)
+        group_layout.addWidget(buttonTR_validate, 6, 0, 1, 0)
 
         group_box_translate.setLayout(group_layout)
         
@@ -597,16 +1151,18 @@ class MyApp(QWidget):
         main_layout.addWidget(lang_widget, 0, 0, 1, 2)
         # 1: Полная распаковка — на всю ширину
         main_layout.addWidget(group_box_full_extract, 1, 0, 1, 2)
-        # 2: Распаковка файла / Распаковка текста
-        main_layout.addWidget(group_box_extr_files, 2, 0)
-        main_layout.addWidget(group_box_extr_texts, 2, 1)
-        # 3: Запаковка текста / Запаковка файлов
-        main_layout.addWidget(group_box_pack_texts, 3, 0)
-        main_layout.addWidget(group_box_pack_files, 3, 1)
-        # 4: Перевод по ID — на всю ширину
-        main_layout.addWidget(group_box_translate, 4, 0, 1, 2)
-        # 5: Лог — на всю ширину
-        main_layout.addWidget(self.log_box, 5, 0, 1, 2)
+        # 2: Полная запаковка — на всю ширину
+        main_layout.addWidget(group_box_full_pack, 2, 0, 1, 2)
+        # 3: Распаковка файла / Распаковка текста
+        main_layout.addWidget(group_box_extr_files, 3, 0)
+        main_layout.addWidget(group_box_extr_texts, 3, 1)
+        # 4: Запаковка текста / Запаковка файлов
+        main_layout.addWidget(group_box_pack_texts, 4, 0)
+        main_layout.addWidget(group_box_pack_files, 4, 1)
+        # 5: Перевод по ID — на всю ширину
+        main_layout.addWidget(group_box_translate, 5, 0, 1, 2)
+        # 6: Лог — на всю ширину
+        main_layout.addWidget(self.log_box, 6, 0, 1, 2)
 
         self.setLayout(main_layout)
 
@@ -615,8 +1171,15 @@ class MyApp(QWidget):
             if self.lang_combo.itemData(i) == self.current_lang:
                 self.lang_combo.setCurrentIndex(i)
                 break
-        # Сохраняем язык при смене пользователем
+        # Текущий путь формата текста (по умолчанию 2.0)
+        for i in range(self.comboTextPath.count()):
+            if self.comboTextPath.itemData(i) == CURRENT_TEXT_PATH:
+                self.comboTextPath.setCurrentIndex(i)
+                break
+
+        # Сохраняем язык и путь при смене пользователем
         self.lang_combo.currentIndexChanged.connect(self.on_language_changed)
+        self.comboTextPath.currentIndexChanged.connect(self.on_text_path_changed)
 
         self.EFinput_path = None
         self.EFoutput_dir = None
@@ -629,6 +1192,9 @@ class MyApp(QWidget):
         self.TRinput_path = None
         self.FEinput_path = None
         self.FEoutput_dir = None
+        self.FP_base_dir = None
+        self.FP_trans_path = None
+        self.FP_output_file = None
 
         # Загружаем сохранённые пути, если есть
         self.load_paths_config()
@@ -680,8 +1246,11 @@ class MyApp(QWidget):
         _set_path("TRinput_path", self.labelTR_select_file, "TRinput_path", False)
         _set_path("FEinput_path", self.labelFE_select_file, "FEinput_path", False)
         _set_path("FEoutput_dir", self.labelFE_output_folder, "FEoutput_dir", True)
+        _set_path("FP_base_dir", self.labelFP_base_folder, "FP_base_dir", True)
+        _set_path("FP_trans_path", self.labelFP_trans_file, "FP_trans_path", False)
+        _set_path("FP_output_file", self.labelFP_output_file, "FP_output_file", False)
 
-        # Загрузка настроек (язык интерфейса)
+        # Загрузка настроек (язык интерфейса, путь формата текста)
         if "settings" in config:
             settings = config["settings"]
             lang_code = settings.get("language", "en").strip() or "en"
@@ -690,6 +1259,15 @@ class MyApp(QWidget):
                 if self.lang_combo.itemData(i) == lang_code:
                     self.lang_combo.setCurrentIndex(i)
                     break
+
+            text_path = settings.get("text_path", TEXT_FORMAT_PATH_2).strip() or TEXT_FORMAT_PATH_2
+            global CURRENT_TEXT_PATH
+            CURRENT_TEXT_PATH = text_path
+            if hasattr(self, "comboTextPath"):
+                for i in range(self.comboTextPath.count()):
+                    if self.comboTextPath.itemData(i) == text_path:
+                        self.comboTextPath.setCurrentIndex(i)
+                        break
 
     def save_paths_config(self):
         """Сохранение текущих путей в config.ini."""
@@ -710,6 +1288,7 @@ class MyApp(QWidget):
             "PTinput_path", "PToutput_dir",
             "TRinput_path",
             "FEinput_path", "FEoutput_dir",
+            "FP_base_dir", "FP_trans_path", "FP_output_file",
         ]:
             value = getattr(self, key, None)
             if value:
@@ -724,6 +1303,11 @@ class MyApp(QWidget):
             if current_lang:
                 settings["language"] = current_lang
 
+        if hasattr(self, "comboTextPath"):
+            current_path = self.comboTextPath.currentData()
+            if current_path:
+                settings["text_path"] = current_path
+
         try:
             with open(self.config_path, "w", encoding="utf-8") as cfg:
                 config.write(cfg)
@@ -736,6 +1320,14 @@ class MyApp(QWidget):
         if data:
             self.current_lang = data
             # Пересохраняем настройки (включая language)
+            self.save_paths_config()
+
+    def on_text_path_changed(self, index):
+        """Обработчик смены версии формата текста (1.0 / 2.0)."""
+        data = self.comboTextPath.itemData(index)
+        if data:
+            global CURRENT_TEXT_PATH
+            CURRENT_TEXT_PATH = data
             self.save_paths_config()
 
     # Функция записи в лог
@@ -838,6 +1430,41 @@ class MyApp(QWidget):
             self.FEoutput_dir = folder_path
             self.log(f"Для полной распаковки выбрана папка: {folder_path} (будут созданы data и text)")
             self.labelFE_output_folder.setText(f"{folder_path}")
+            self.save_paths_config()
+
+    # Функции для полной запаковки (data + text → файл)
+    def selectFP_base_folder(self):
+        folder_path = QFileDialog.getExistingDirectory(self, "Выберите папку, в которой есть подпапки data и text")
+        if folder_path:
+            self.FP_base_dir = folder_path
+            self.log(f"Для полной запаковки выбрана база: {folder_path} (ожидаются подпапки data и text)")
+            self.labelFP_base_folder.setText(f"{folder_path}")
+            self.save_paths_config()
+
+    def selectFP_trans_file(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Выберите файл перевода CSV/TSV (ID,OriginalText)",
+            filter='CSV/TSV Files (*.csv *.tsv)'
+        )
+        if file_path:
+            self.FP_trans_path = file_path
+            self.log(f"Для полной запаковки выбран файл перевода: {file_path}")
+            self.labelFP_trans_file.setText(f"{file_path}")
+            self.save_paths_config()
+
+    def selectFP_output_file(self):
+        default_name = "translate_words_map_en"
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Выберите имя и папку итогового файла",
+            default_name,
+            "All Files (*.*)"
+        )
+        if file_path:
+            self.FP_output_file = file_path
+            self.log(f"Итоговый файл для полной запаковки: {file_path}")
+            self.labelFP_output_file.setText(f"{file_path}")
             self.save_paths_config()
 
     # Создать CSV ID,OriginalText из TextExtractor.csv
@@ -1060,7 +1687,125 @@ class MyApp(QWidget):
             self.log(f"✅ Создан debug файл: {output_path} (строк с тегами: {count})")
         except Exception as e:
             self.log(f"❌ Ошибка при создании debug файла: {str(e)}")
-    
+
+    def validate_textextractor_csv(self):
+        """
+        Проверка выбранного TextExtractor.csv на базовые ошибки формата:
+        - наличие заголовка
+        - одинаковое количество колонок в каждой строке
+        - базовая проверка числовых и hex полей
+        - проверка OriginalText на наличие ID (hex-строк длиной 16 символов)
+        """
+        if not self.TRinput_path:
+            self.log("Пожалуйста, выберите TextExtractor.csv для проверки")
+            return
+
+        try:
+            with open(self.TRinput_path, 'r', encoding='utf-8', newline='') as f:
+                reader = csv.reader(f, delimiter=';')
+                header = next(reader, None)
+                if not header:
+                    self.log("❌ В TextExtractor.csv нет заголовка")
+                    return
+
+                # Находим индекс колонки OriginalText
+                try:
+                    text_idx = header.index('OriginalText')
+                except ValueError:
+                    text_idx = None
+
+                expected_cols = len(header)
+                total_rows = 0
+                error_rows = 0
+                logged_errors = 0
+
+                # Паттерн для поиска hex-строк длиной 16 символов (8 байт = ID)
+                hex_id_pattern = re.compile(r'[0-9a-fA-F]{16}')
+
+                for line_no, row in enumerate(reader, start=2):
+                    total_rows += 1
+                    row_errors = []
+
+                    # Количество колонок
+                    if len(row) != expected_cols:
+                        row_errors.append(
+                            f"ожидалось колонок: {expected_cols}, получено: {len(row)}"
+                        )
+                    else:
+                        # Базовые проверки формата для стандартного TextExtractor.csv
+                        try:
+                            if row[0] and not row[0].isdigit():
+                                row_errors.append("поле Number не является числом")
+                        except IndexError:
+                            row_errors.append("нет поля Number")
+
+                        try:
+                            if row[2] and not row[2].isdigit():
+                                row_errors.append("поле All Blocks не является числом")
+                        except IndexError:
+                            pass
+
+                        try:
+                            if row[3] and not row[3].isdigit():
+                                row_errors.append("поле Work Blocks не является числом")
+                        except IndexError:
+                            pass
+
+                        # Unknown (1 байт hex)
+                        try:
+                            if row[5]:
+                                bytes.fromhex(row[5])
+                        except (IndexError, ValueError):
+                            row_errors.append("поле Unknown не является корректным hex-байтом")
+
+                        # ID (8 байт hex)
+                        try:
+                            if row[6]:
+                                bytes.fromhex(row[6])
+                        except (IndexError, ValueError):
+                            row_errors.append("поле ID не является корректной hex-строкой")
+
+                        # Проверка OriginalText на наличие ID (hex-строк длиной 16 символов)
+                        if text_idx is not None:
+                            try:
+                                if len(row) > text_idx and row[text_idx]:
+                                    text = row[text_idx]
+                                    # Ищем hex-строки длиной 16 символов в тексте
+                                    found_ids = hex_id_pattern.findall(text)
+                                    if found_ids:
+                                        # Проверяем, что найденные строки действительно являются валидными hex
+                                        valid_ids = []
+                                        for hex_str in found_ids:
+                                            try:
+                                                # Проверяем, что это действительно hex (8 байт)
+                                                bytes.fromhex(hex_str)
+                                                valid_ids.append(hex_str)
+                                            except ValueError:
+                                                pass
+                                        if valid_ids:
+                                            row_errors.append(
+                                                f"в поле OriginalText обнаружен ID (hex-строка): {', '.join(valid_ids[:3])}"
+                                                + (f" и еще {len(valid_ids) - 3}" if len(valid_ids) > 3 else "")
+                                            )
+                            except IndexError:
+                                pass
+
+                    if row_errors:
+                        error_rows += 1
+                        if logged_errors < 50:
+                            self.log(f"❌ Строка {line_no}: " + "; ".join(row_errors))
+                            logged_errors += 1
+
+                if error_rows == 0:
+                    self.log(f"✅ Проверка завершена. Найдено строк: {total_rows}, ошибок не обнаружено.")
+                else:
+                    self.log(
+                        f"⚠ Проверка завершена. Всего строк: {total_rows}, проблемных строк: {error_rows}. "
+                        f"Показано первых {logged_errors} ошибок."
+                    )
+        except Exception as e:
+            self.log(f"❌ Ошибка при проверке TextExtractor.csv: {str(e)}")
+
     # Функция запуска скрипта распаковки файла
     def start_processing1(self):
         if not self.EFinput_path:
@@ -1123,6 +1868,27 @@ class MyApp(QWidget):
             return
 
         self.worker = WorkerThread(self.FEinput_path, self.FEoutput_dir, 5)
+        self.worker.log_signal.connect(self.log)
+        self.worker.start()
+
+    # Функция запуска полной запаковки (data + text → файл)
+    def start_processing6(self):
+        if not self.FP_base_dir:
+            self.log("Пожалуйста, выберите базовую папку, где находятся подпапки data и text")
+            return
+        if not self.FP_trans_path:
+            self.log("Пожалуйста, выберите файл перевода CSV/TSV (ID,OriginalText)")
+            return
+        if not self.FP_output_file:
+            self.log("Пожалуйста, выберите итоговый файл для полной запаковки")
+            return
+
+        self.worker = WorkerThread(
+            self.FP_base_dir,
+            self.FP_output_file,
+            6,
+            extra={"trans_path": self.FP_trans_path},
+        )
         self.worker.log_signal.connect(self.log)
         self.worker.start()
 
